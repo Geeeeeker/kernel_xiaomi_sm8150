@@ -7,10 +7,6 @@ on:
       - stable/*
   workflow_dispatch:
 
-# 移除了原有的 AOSP 相关环境变量，改用固定源
-env:
-  # 不再需要 AOSP_TOOLCHAIN_BRANCH 和 AOSP_CLANG_VERSION
-
 jobs:
   build:
     name: 编译内核
