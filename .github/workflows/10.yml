@@ -7,9 +7,9 @@ on:
       - stable/*
   workflow_dispatch:
 
+# 移除了原有的 AOSP 相关环境变量，改用固定源
 env:
-  AOSP_TOOLCHAIN_BRANCH: android10        # 分支名不包含 "-release"
-  AOSP_CLANG_VERSION: r365631c
+  # 不再需要 AOSP_TOOLCHAIN_BRANCH 和 AOSP_CLANG_VERSION
 
 jobs:
   build:
@@ -27,7 +27,6 @@ jobs:
         run: |
           sudo apt update > /dev/null
           sudo apt install -y ${{ env.PACKAGES }} > /dev/null
-
       - name: 同步仓库
         uses: actions/checkout@v4
         with:
@@ -38,15 +37,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: clang
-          key: clang-${{ env.AOSP_TOOLCHAIN_BRANCH }}-${{ env.AOSP_CLANG_VERSION }}
+          # 更新缓存键，指向新的 Clang 源
+          key: clang-geeeker-11-master
 
       - name: 下载Clang
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
-          mkdir -p clang &&
-          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${{ env.AOSP_TOOLCHAIN_BRANCH }}-release/clang-${{ env.AOSP_CLANG_VERSION }}.tar.gz" |
-          tar xz -C clang
-
+          mkdir -p clang
+          # 从 Geeeeeker/clang-11 的 master 分支下载并解压，去除顶层目录
+          curl -LSs "https://github.com/Geeeeeker/clang-11/archive/refs/heads/master.tar.gz" | tar xz -C clang --strip-components=1
       - name: 缓存ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
@@ -76,14 +75,12 @@ jobs:
           
           # 禁用 CC_WERROR
           echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
-
       - name: 配置 LXC 和 Docker 支持
         working-directory: kernel
         run: |
           DEFCONFIG="arch/arm64/configs/raphael_defconfig"
           rm -rf utils
           git clone https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
-
           # 移除 LXC 补丁中强制选中的越权语句
           sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
           sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
@@ -97,7 +94,6 @@ jobs:
           # 在 defconfig 显式禁用会引发代码冲突的调度器特性
           echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
           echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
-
           # 禁用偏执网络
           sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' $DEFCONFIG
           echo "# CONFIG_ANDROID_PARANOID_NETWORK is not set" >> $DEFCONFIG
@@ -105,12 +101,10 @@ jobs:
           # 显式禁用发生冲突的 Block 特性
           echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
           echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
-
           # 修复内核源码自带的 QVR 设备树语法错误 (sdm845)
           sed -i '/sdm845-v2-qvr-evt.dtb/d' arch/arm64/boot/dts/qcom/Makefile
           sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
           sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
-
           # 统一在此处应用 runc 补丁和 qtaguid 补丁
           chmod +x utils/runcpatch.sh
           if [ -f kernel/cgroup/cgroup.c ]; then
@@ -122,7 +116,6 @@ jobs:
           if [ -f net/netfilter/xt_qtaguid.c ]; then
               patch -p0 < utils/xt_qtaguid.patch
           fi
-
       - name: 修复触摸屏驱动中的函数原型 (添加 void)
         working-directory: kernel
         run: |
@@ -135,7 +128,6 @@ jobs:
           else
             echo "警告：$FILE 不存在，跳过"
           fi
-
       # ---------- 核心修改：仅编译内核，使用预编译 dtb ----------
       - name: 检查预编译设备树文件是否存在
         working-directory: kernel
@@ -146,7 +138,6 @@ jobs:
             exit 1
           fi
           echo "✅ 找到预编译设备树文件：$PREBUILT_DTB"
-
       - name: 编译内核 (仅内核镜像，不编译设备树)
         working-directory: kernel
         run: |
@@ -154,7 +145,6 @@ jobs:
           export KBUILD_BUILD_USER=${{ github.repository_owner }}
           export KBUILD_BUILD_HOST=github-runner
           export KBUILD_BUILD_TIMESTAMP=$(date -u -d "@$(git log -1 --format=%at)" +"%a %b %d %H:%M:%S %Z %Y")
-
           # 配置内核
           make -j$(nproc --all) \
             CC="ccache clang" \
@@ -166,7 +156,6 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             raphael_defconfig
-
           # 仅编译内核镜像 (Image)，跳过所有 dtbs
           make -j$(nproc --all) \
             CC="ccache clang" \
@@ -178,18 +167,14 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             Image
-
           # 使用预编译 dtb 生成 Image.gz-dtb
           PREBUILT_DTB="arch/arm64/boot/dts/qcom/sm8150-xiaomi.dtb"
           mkdir -p out/arch/arm64/boot/dts/qcom
           cp "$PREBUILT_DTB" out/arch/arm64/boot/dts/qcom/
-
           # 合并 Image 和 dtb 并压缩
           cat out/arch/arm64/boot/Image out/arch/arm64/boot/dts/qcom/sm8150-xiaomi.dtb > out/arch/arm64/boot/Image-dtb
           gzip -c out/arch/arm64/boot/Image-dtb > out/arch/arm64/boot/Image.gz-dtb
-
           echo "✅ 成功生成 out/arch/arm64/boot/Image.gz-dtb"
-
       # ---------- AnyKernel3 打包 (始终可用) ----------
       - name: 打包(AnyKernel3)
         run: |
@@ -211,7 +196,6 @@ jobs:
           flash_boot
           EOF
           zip -qr9 Anykernel3-${{ matrix.device }}.zip * -x .git .github README.md *placeholder
-
       # ---------- 打包 boot 镜像 (带错误处理，避免因 API 问题导致工作流失败) ----------
       - name: 获取 LineageOS boot.img 下载链接
         id: get_boot
@@ -231,7 +215,6 @@ jobs:
           echo "boot_available=true" >> $GITHUB_ENV
           echo "boot_url=$BOOT_URL" >> $GITHUB_ENV
           echo "✅ 获取到 boot.img 链接：$BOOT_URL"
-
       - name: 打包(boot) - 生成新 boot 镜像
         if: env.boot_available == 'true'
         run: |
@@ -243,7 +226,6 @@ jobs:
           mv Image.gz-dtb out/kernel
           eval "./mkbootimg.py $mkbootimg_args -o boot-lineage-${{ matrix.device }}.img"
           echo "✅ 成功生成 boot-lineage-${{ matrix.device }}.img"
-
       - name: 上传 AnyKernel3 包
         uses: actions/upload-artifact@v5
         with:
@@ -276,7 +258,6 @@ jobs:
         run: |
           echo "time=$(TZ='Asia/Shanghai' date -u +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
           echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
-
       - name: 下载 KernelSU Manager
         continue-on-error: true
         uses: dawidd6/action-download-artifact@v11
